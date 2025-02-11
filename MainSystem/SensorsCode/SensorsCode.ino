@@ -20,7 +20,6 @@
 #include "src/VibrationSensor.h"
 #include "src/SoundSensor.h"
 
-
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
 #endif
@@ -29,11 +28,15 @@
 #error Serial Bluetooth not available or not enabled. It is only available for the ESP32 chip.
 #endif
 
+unsigned long previousMillis = 0;
+const long interval = 1000; // Interval for logging data (1 second)
+
 // These are the handles to the separate threads. Each individual thread will run one of the sensors
 TaskHandle_t vibrationThread;
 TaskHandle_t motionThread;
 TaskHandle_t proximityThread;
 TaskHandle_t lightThread;
+TaskHandle_t DataloggingThread;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Bluetooth Parameters, macros for sensor delay from active to nonactive
@@ -53,14 +56,14 @@ TaskHandle_t lightThread;
 #define EMERGENCY_ALERT_TIME 2
 
 BluetoothSerial bluetooth;
-BLECharacteristic* characteristic;  // This is a handle to the main system's main data BLE characteristic that the Android app will retrieve it's data from
+BLECharacteristic *characteristic; // This is a handle to the main system's main data BLE characteristic that the Android app will retrieve it's data from
 
 // This is a handle to the BLE characteristic that the subsystem will write the room's occupation status to
 // The main system will use this characteristic in combination with time since last detection to determine if an emergency alert should be sent
-BLECharacteristic* subsystemCharacteristic;
+BLECharacteristic *subsystemCharacteristic;
 
 // Pointer to BLEAdvertising object that will be used to start and stop the advertising of the main system's BLE service and characteristics as needed
-BLEAdvertising* advertising;
+BLEAdvertising *advertising;
 
 // Tracks the number of devices connected to this main system (via BLE)
 // By default, there should at least be one BLE connection at all times (the subsystem) and the main system should not be advertising
@@ -79,41 +82,47 @@ const int vibrationInputPin = 36;
 const int soundInputPin = 26;
 const int soundGatePin = 27;
 
-
 // Implementing class for BLEServerCallbacks
-class MyServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* server) override;
-  void onDisconnect(BLEServer* server) override;
+class MyServerCallbacks : public BLEServerCallbacks
+{
+  void onConnect(BLEServer *server) override;
+  void onDisconnect(BLEServer *server) override;
 };
 
 // After the subsystem successfully establishes a connection, the main system will stop advertising to prevent any other connections
 // If for some reason the subsystem is disconnected, begin advertising again to allow it to reconnect
-void MyServerCallbacks::onConnect(BLEServer* server) {
+void MyServerCallbacks::onConnect(BLEServer *server)
+{
   connectedDevices++;
-  if (advertising != nullptr) {
-     Serial.println("A device connected");
-     if (connectedDevices >= 1) {
+  if (advertising != nullptr)
+  {
+    Serial.println("A device connected");
+    if (connectedDevices >= 1)
+    {
       Serial.println("All devices connected. Stopping BLE advertise...");
       server->getAdvertising()->stop();
-     } else {
-      server->getAdvertising()->start(); 
-     }
-     Serial.print("Connected devices: ");
-     Serial.println(connectedDevices);
+    }
+    else
+    {
+      server->getAdvertising()->start();
+    }
+    Serial.print("Connected devices: ");
+    Serial.println(connectedDevices);
   }
 }
 
-// On subsystem disconnect, if there are no connected devices, begin advertising 
-void MyServerCallbacks::onDisconnect(BLEServer* server) {
-  connectedDevices--;  
+// On subsystem disconnect, if there are no connected devices, begin advertising
+void MyServerCallbacks::onDisconnect(BLEServer *server)
+{
+  connectedDevices--;
   Serial.println("Device disconnected");
   Serial.print("Connected devices: ");
   Serial.println(connectedDevices);
-  if (connectedDevices < 1) {
+  if (connectedDevices < 1)
+  {
     server->getAdvertising()->start();
   }
 }
-
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // calibration time (in seconds) for the sensors to be calibrated
@@ -123,28 +132,28 @@ const int calibrationTime = 30;
 ////////////////////////////////////////////////////////////////////////////////////////
 // Dynamically allocated MotionSensor object which will be used for interacting with the motion sensor
 ////////////////////////////////////////////////////////////////////////////////////////
-MotionSensor* motionSensor;
+MotionSensor *motionSensor;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Ultrasonic sensor objects for interacting with the ultrasonic sensors
 ////////////////////////////////////////////////////////////////////////////////////////
-UltrasonicSensor* ultrasonicSensor;
-UltrasonicSensor* secondUltrasonicSensor;
+UltrasonicSensor *ultrasonicSensor;
+UltrasonicSensor *secondUltrasonicSensor;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Vibration sensor object for interacting with the vibration sensor
 ////////////////////////////////////////////////////////////////////////////////////////
-VibrationSensor* vibrationSensor;
+VibrationSensor *vibrationSensor;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Light sensor object
 ////////////////////////////////////////////////////////////////////////////////////////
-LightSensor* lightSensor;
+// LightSensor *lightSensor;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Sound sensor object
 ////////////////////////////////////////////////////////////////////////////////////////
-SoundSensor* soundSensor;
+SoundSensor *soundSensor;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // String variable to keep track of previous detection state
@@ -155,8 +164,8 @@ String previousMessage = "";
 // keep track of current time in ms when one of the sensors read HIGH
 ////////////////////////////////////////////////////////////////////////////////////////
 unsigned int timeOfDetection = 0;
-unsigned int lastDetected = 0;  // time since last detection in seconds
-unsigned int minutes = 0;     // minutes that have passed since last detection
+unsigned int lastDetected = 0; // time since last detection in seconds
+unsigned int minutes = 0;      // minutes that have passed since last detection
 unsigned int alertMinutes = 0; // this will determine when an alert will be sent (if it's equal to or greater than EMERGENCY_ALERT_TIME
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -165,38 +174,44 @@ unsigned int alertMinutes = 0; // this will determine when an alert will be sent
 StaticJsonDocument<300> jsonData;
 String stringData;
 
-
 ////////////////////////////////////////////////////////////////////////////////////////
 // Motion Buffer class to store last 500 sensor readings from the motion sensor (work in progress)
 ////////////////////////////////////////////////////////////////////////////////////////
 
-enum class BufferResult {
+enum class BufferResult
+{
   NO_ALERT,
   SEND_ALERT
 };
 
-class MotionBuffer {
-  private:
+class MotionBuffer
+{
+private:
   int buffer[MOTION_BUFFER_SIZE];
   int current_index = 0;
   bool full = false;
-  public:
+
+public:
   void appendReading(int value);
   void clear();
   bool isFull() const;
   BufferResult processBuffer();
 };
 
-void MotionBuffer::appendReading(int value) {
+void MotionBuffer::appendReading(int value)
+{
   buffer[current_index] = value;
   current_index++;
-  if (current_index >= MOTION_BUFFER_SIZE) {
+  if (current_index >= MOTION_BUFFER_SIZE)
+  {
     full = true;
   }
 }
 
-void MotionBuffer::clear() {
-  for (int i = 0; i < MOTION_BUFFER_SIZE; i++) {
+void MotionBuffer::clear()
+{
+  for (int i = 0; i < MOTION_BUFFER_SIZE; i++)
+  {
     buffer[i] = int();
   }
   current_index = 0;
@@ -204,22 +219,30 @@ void MotionBuffer::clear() {
 
 bool MotionBuffer::isFull() const { return full; }
 
-BufferResult MotionBuffer::processBuffer() {
+BufferResult MotionBuffer::processBuffer()
+{
   int num_high_readings = 0;
-  for (int i = 0; i < MOTION_BUFFER_SIZE; i++) {
-    switch(buffer[i]) {
-      case 0 : {
-        break;
-      }
-      case 1 : {
-        num_high_readings++;
-        break;
-      }
+  for (int i = 0; i < MOTION_BUFFER_SIZE; i++)
+  {
+    switch (buffer[i])
+    {
+    case 0:
+    {
+      break;
+    }
+    case 1:
+    {
+      num_high_readings++;
+      break;
+    }
     }
   }
-  if (num_high_readings < MOTION_BUFFER_CUTOFF) {
+  if (num_high_readings < MOTION_BUFFER_CUTOFF)
+  {
     return BufferResult::SEND_ALERT;
-  } else {
+  }
+  else
+  {
     return BufferResult::NO_ALERT;
   }
   clear();
@@ -230,20 +253,26 @@ MotionBuffer motion_buffer;
 ////////////////////////////////////////////////////////////////////////////////////////
 // BLE Response Class for parsing the response from the subsystem characteristic and setting room occupied status
 ////////////////////////////////////////////////////////////////////////////////////////
-class BLEResponse {
-  private:
+class BLEResponse
+{
+private:
   std::string previousResponse = "";
   boolean isOccupied = false;
-  
-  public:
-  void parseResponse(std::string response) {
-    if (response == std::string("Occupied")) {
+
+public:
+  void parseResponse(std::string response)
+  {
+    if (response == std::string("Occupied"))
+    {
       isOccupied = true;
-    } else {
+    }
+    else
+    {
       isOccupied = false;
     }
     // When the room occupation status transitions, we want to reset the minutes counter
-    if (response != previousResponse) {
+    if (response != previousResponse)
+    {
       minutes = 0;
       previousResponse = response;
     }
@@ -253,39 +282,41 @@ class BLEResponse {
 
 BLEResponse parser;
 
-
 ////////////////////////////////////////////////////////////////////////////////////////
 // TempAdvertise interface that can be implemented to determine what the behavior of starting BLE advertising should be
 ////////////////////////////////////////////////////////////////////////////////////////
-class TempAdvertise {
-  public:
+class TempAdvertise
+{
+public:
   virtual void onTempAdvertising(unsigned long milliseconds) = 0;
 };
 
-
 // Class that implements TempAdvertise
-class MyTempAdvertise: public TempAdvertise {
-  public:
+class MyTempAdvertise : public TempAdvertise
+{
+public:
   void onTempAdvertising(unsigned long milliseconds) override;
 };
 
 // Start advertising, wait for the specified number of milliseconds, then stop advertising
-void MyTempAdvertise::onTempAdvertising(unsigned long milliseconds) {
+void MyTempAdvertise::onTempAdvertising(unsigned long milliseconds)
+{
   advertising->start();
   delay(milliseconds);
   advertising->stop();
 }
 
-void startTempAdvertising(TempAdvertise* tempAdvertise) {
-  tempAdvertise->onTempAdvertising(60000);    // begin BLE advertising for a full minute
+void startTempAdvertising(TempAdvertise *tempAdvertise)
+{
+  tempAdvertise->onTempAdvertising(60000); // begin BLE advertising for a full minute
 }
 
-MyTempAdvertise* tempAdvertiseCallback = new MyTempAdvertise();
-
+MyTempAdvertise *tempAdvertiseCallback = new MyTempAdvertise();
 
 // Helper method that takes a String message to set the main system's characteristic's value
 // We convert the message into an array of bytes before setting the value, which will be translated to proper characters by the ESP32 via UTF-8
-void sendBluetoothMessage(String message, BLECharacteristic* characteristic) {
+void sendBluetoothMessage(String message, BLECharacteristic *characteristic)
+{
   uint8_t data[message.length() + 1];
   memcpy(data, message.c_str(), message.length());
   characteristic->setValue(data, message.length());
@@ -293,51 +324,254 @@ void sendBluetoothMessage(String message, BLECharacteristic* characteristic) {
 }
 
 // Tasks/functions for multithreading sensors
-void lightTask(void* parameter) {
-  while (true) {
-    lightSensor->start();
-    vTaskDelay(pdMS_TO_TICKS(50));
-  }
-}
+// void lightTask(void *parameter)
+// {
+//   while (true)
+//   {
+//     lightSensor->start();
+//     vTaskDelay(pdMS_TO_TICKS(50));
+//   }
+// }
 
-void soundTask(void* parameter) {
-  while (true) {
+void soundTask(void *parameter)
+{
+  while (true)
+  {
     soundSensor->start();
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
-void vibrationTask(void* parameter) {
-  while (true) {
+void vibrationTask(void *parameter)
+{
+  while (true)
+  {
     vibrationSensor->start();
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
+//////////////////////// SD Card Functions ////////////////////////
 
-void setup() {
+// List the files in the SD card
+void listDir(fs::FS &fs, const char *dirname, uint8_t levels) {
+  Serial.printf("Listing directory: %s\n", dirname);
+
+  File root = fs.open(dirname);
+  if (!root) {
+    Serial.println("Failed to open directory");
+    return;
+  }
+  if (!root.isDirectory()) {
+    Serial.println("Not a directory");
+    return;
+  }
+
+  File file = root.openNextFile();
+  while (file) {
+    if (file.isDirectory()) {
+      Serial.print("  DIR : ");
+      Serial.println(file.name());
+      if (levels) {
+        listDir(fs, file.path(), levels - 1);
+      }
+    } else {
+      Serial.print("  FILE: ");
+      Serial.print(file.name());
+      Serial.print("  SIZE: ");
+      Serial.println(file.size());
+    }
+    file = root.openNextFile();
+  }
+}
+
+// Create a new directory
+void createDir(fs::FS &fs, const char *path) {
+  Serial.printf("Creating Dir: %s\n", path);
+  if (fs.mkdir(path)) {
+    Serial.println("Dir created");
+  } else {
+    Serial.println("mkdir failed");
+  }
+}
+
+// Remove a directory
+void removeDir(fs::FS &fs, const char *path) {
+  Serial.printf("Removing Dir: %s\n", path);
+  if (fs.rmdir(path)) {
+    Serial.println("Dir removed");
+  } else {
+    Serial.println("rmdir failed");
+  }
+}
+
+// Read a file and print its contents
+void readFile(fs::FS &fs, const char *path) {
+  Serial.printf("Reading file: %s\n", path);
+
+  File file = fs.open(path);
+  if (!file) {
+    Serial.println("Failed to open file for reading");
+    return;
+  }
+
+  Serial.print("Read from file: ");
+  while (file.available()) {
+    Serial.write(file.read());
+  }
+  file.close();
+}
+
+// Write to a file
+void writeFile(fs::FS &fs, const char *path, const char *message) {
+  Serial.printf("Writing file: %s\n", path);
+
+  File file = fs.open(path, FILE_WRITE);
+  if (!file) {
+    Serial.println("Failed to open file for writing");
+    return;
+  }
+  if (file.print(message)) {
+    Serial.println("File written");
+  } else {
+    Serial.println("Write failed");
+  }
+  file.close();
+}
+
+// Append to a file
+void appendFile(fs::FS &fs, const char *path, const char *message) {
+  Serial.printf("Appending to file: %s\n", path);
+
+  File file = fs.open(path, FILE_APPEND);
+  if (!file) {
+    Serial.println("Failed to open file for appending");
+    return;
+  }
+  if (file.print(message)) {
+    Serial.println("Message appended");
+  } else {
+    Serial.println("Append failed");
+  }
+  file.close();
+}
+
+// Rename a file
+void renameFile(fs::FS &fs, const char *path1, const char *path2) {
+  Serial.printf("Renaming file %s to %s\n", path1, path2);
+  if (fs.rename(path1, path2)) {
+    Serial.println("File renamed");
+  } else {
+    Serial.println("Rename failed");
+  }
+}
+
+// Delete a file
+void deleteFile(fs::FS &fs, const char *path) {
+  Serial.printf("Deleting file: %s\n", path);
+  if (fs.remove(path)) {
+    Serial.println("File deleted");
+  } else {
+    Serial.println("Delete failed");
+  }
+}
+
+// Helper function to log the relevent sensor data to the SD card
+void logData() {
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    // Get the current time
+    String time = String(currentMillis / 1000);
+
+    // Retrieve sensor data
+    bool motion = motionSensor->isActive();
+    bool proximity = ultrasonicSensor->isActive();
+    bool occupied = parser.getOccupied();
+    float distance = ultrasonicSensor->distance();
+    float vibrationIntensity = vibrationSensor->intensity();
+    float vibrationBaseline = vibrationSensor->baseline();
+    float proximityBaseline = ultrasonicSensor->baseline();
+    int connectedDevices = jsonData["connected_devices"];
+
+    // Format the data string
+    String dataString = time + " -> motion: " + motion + ", proximity: " + proximity + ", occupied: " + occupied +
+                        ", distance: " + distance + ", vibrationIntensity: " + vibrationIntensity +
+                        ", vibrationBaseline: " + vibrationBaseline + ", proximityBaseline: " + proximityBaseline +
+                        ", connected_devices: " + connectedDevices + "\n";
+
+    // Write the data string to the SD card
+    appendFile(SD, "/log.txt", dataString.c_str());
+  }
+}
+
+// data logging task
+void DataloggingTask(void *parameter) {
+  while (true) {
+    logData();
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
+
+void setup()
+{
+  Serial.begin(115200);
+
+  // Initializing SD card
+  SPI.begin();
+
+  // output to serial monitor if SD card is connected or not
+  if (!SD.begin())
+  {
+    Serial.println("Card failed, or not present");
+    return;
+  }
+  Serial.println("card initialized.");
+
+  uint8_t cardType = SD.cardType();
+
+  // output SD card information
+  Serial.print("SD Card Type: ");
+  if (cardType == CARD_MMC)
+  {
+    Serial.println("MMC");
+  }
+  else if (cardType == CARD_SD)
+  {
+    Serial.println("SDSC");
+  }
+  else if (cardType == CARD_SDHC)
+  {
+    Serial.println("SDHC");
+  }
+  else
+  {
+    Serial.println("UNKNOWN");
+  }
+
   motionSensor = new MotionSensor(motionSensorInputPin);
   ultrasonicSensor = new UltrasonicSensor(trigPin, echoPin);
-  lightSensor = new LightSensor;
+  //  lightSensor = new LightSensor;
   vibrationSensor = new VibrationSensor(vibrationInputPin);
 
-  lightSensor->setup();
+  // lightSensor->setup();
   vibrationSensor->setup();
   light_module.begin();
 
   // Initializing I2C (the vibration and light sensor uses I2C)
   Wire.begin();
 
-  Serial.begin(115200);
   Serial.println("Starting BLE setup...");
 
   // Initialize BLE for the main system with the name "ESP32"
   BLEDevice::init("ESP32");
 
   // Creating the BLEServer that will hold all of the necessary BLE services and characteristics
-  BLEServer* server = BLEDevice::createServer();
+  BLEServer *server = BLEDevice::createServer();
   server->setCallbacks(new MyServerCallbacks());
-  BLEService* service = server->createService(SERVICE_UUID);
+  BLEService *service = server->createService(SERVICE_UUID);
 
   // Creating the main characteristic that will hold all of the sensor data
   characteristic = service->createCharacteristic(CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_INDICATE);
@@ -368,66 +602,75 @@ void setup() {
   BLEDevice::startAdvertising();
   Serial.println("BLE setup complete!\n");
 
-  SPI.begin();
-
   Serial.print("calibrating sensor ");
-  for (int i = 0; i < calibrationTime; i++) {
+  for (int i = 0; i < calibrationTime; i++)
+  {
     Serial.print(".");
     delay(1000);
   }
   Serial.println(" done");
   Serial.println("SENSOR ACTIVE");
 
+  // Start the data logging task on core 0
+  xTaskCreatePinnedToCore(DataloggingTask, "DataloggingTask", 10000, NULL, 0, NULL, 0);
+
   // Start the light and vibration sensors on a separate thread on core 0
-  xTaskCreatePinnedToCore(lightTask, "LightTask", 10000, NULL, 0, NULL, 0);
-  //xTaskCreatePinnedToCore(soundTask, "SoundTask", 10000, NULL, 0, NULL, 0);
+//  xTaskCreatePinnedToCore(lightTask, "LightTask", 10000, NULL, 0, NULL, 0);
+  // xTaskCreatePinnedToCore(soundTask, "SoundTask", 10000, NULL, 0, NULL, 0);
   xTaskCreatePinnedToCore(vibrationTask, "VibrationTask", 10000, NULL, 0, NULL, 0);
 }
 
-void loop() {
+void loop()
+{
+
   // Motion and ultrasonic sensor are running on the main thread (on core 1)
   motionSensor->start();
   ultrasonicSensor->start();
 
   // Obtain the number of currently "active" sensors
   // Active means that the sensor has individually concluded that there is human presence/motion within the room
-  int activeSensors = motionSensor->isActive() + ultrasonicSensor->isActive() + lightSensor->isActive();
+  int activeSensors = motionSensor->isActive() + ultrasonicSensor->isActive(); // + lightSensor->isActive();
 
-  // Read the subsystem characteristic value every loop. The String value could potentially change after a write from the subsystem
-  parser.parseResponse(subsystemCharacteristic->getValue().c_str());
+                                                 // Read the subsystem characteristic value every loop. The String value could potentially change after a write from the subsystem
+                                                 parser.parseResponse(subsystemCharacteristic->getValue().c_str());
 
-  
   Serial.print("Light Sensor Baseline: ");
-  Serial.println(lightSensor->baseline());
+  // Serial.println(lightSensor->baseline());
 
   // Setting the key value pairs for the JSON that will be sent to the main sensor data BLE characteristic
   // Boolean Data
   jsonData["motion"] = motionSensor->isActive();
   jsonData["proximity"] = ultrasonicSensor->isActive();
-  jsonData["light"] = lightSensor->isActive();
+  //  jsonData["light"] = lightSensor->isActive();
   jsonData["occupied"] = parser.getOccupied();
 
   // Numerical Data
-  jsonData["lightIntensity"] = lightSensor->lightValue();
+  //  jsonData["lightIntensity"] = lightSensor->lightValue();
   jsonData["distance"] = ultrasonicSensor->distance();
   jsonData["vibrationIntensity"] = vibrationSensor->intensity();
   jsonData["vibrationBaseline"] = vibrationSensor->baseline();
   jsonData["proximityBaseline"] = ultrasonicSensor->baseline();
-  jsonData["lightBaseline"] = lightSensor->baseline();
-  jsonData["lightOffBaseline"] = lightSensor->baseline_off();
+  //  jsonData["lightBaseline"] = lightSensor->baseline();
+  //  jsonData["lightOffBaseline"] = lightSensor->baseline_off();
 
   jsonData["connected_devices"] = connectedDevices;
 
-  if (lightSensor->lightValue() >= 120) {
-    jsonData["lightingStatus"] = "Lights on";
-  } else {
-    jsonData["lightingStatus"] = "Lights off";
-  }
+  // if (lightSensor->lightValue() >= 120)
+  // {
+  //   jsonData["lightingStatus"] = "Lights on";
+  // }
+  // else
+  // {
+  //   jsonData["lightingStatus"] = "Lights off";
+  // }
+
+  // log the sensor data to the SD card
 
   ///////////////////////////////////////////////////////////////////////////////////////////////////////
   // Two or more of the sensors are reading high (person is present)
   ///////////////////////////////////////////////////////////////////////////////////////////////////////
-  if (activeSensors >= 2) {
+  if (activeSensors >= 2)
+  {
     timeOfDetection = millis();
     minutes = 0;
     alertMinutes = 0;
@@ -438,10 +681,12 @@ void loop() {
     sendBluetoothMessage(stringData, characteristic);
     previousMessage = "Person is present";
 
-  /////////////////////////////////////////////////////////////////////////////////////////////////////
-  // All sensors read low (person is absent or not being detected for an extended period of time)
-  /////////////////////////////////////////////////////////////////////////////////////////////////////
-  } else {
+    /////////////////////////////////////////////////////////////////////////////////////////////////////
+    // All sensors read low (person is absent or not being detected for an extended period of time)
+    /////////////////////////////////////////////////////////////////////////////////////////////////////
+  }
+  else
+  {
     lastDetected = ((millis() - timeOfDetection) / 1000); // keeps track of time since last detection in seconds
     jsonData["movement_status"] = "Not present";
 
@@ -451,7 +696,8 @@ void loop() {
     previousMessage = "Not present";
 
     // If person isn't detected, keep track of last detection in minutes
-    if (lastDetected >= 60) {
+    if (lastDetected >= 60)
+    {
       lastDetected = 0;
       timeOfDetection = millis();
       minutes++;
@@ -459,7 +705,8 @@ void loop() {
       jsonData["lastDetected"] = minutes;
 
       // If this statement evaluates to true, an emergency alert notification will be sent to the Android device
-      if (minutes % EMERGENCY_ALERT_TIME == 0 && parser.getOccupied()) {
+      if (minutes % EMERGENCY_ALERT_TIME == 0 && parser.getOccupied())
+      {
         // Start advertising and send an alert to the client device
         alertMinutes = 0;
         startTempAdvertising(tempAdvertiseCallback);
