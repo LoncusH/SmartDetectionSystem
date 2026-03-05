@@ -3,7 +3,6 @@
 #include "BluetoothSerial.h"
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
-#include <Adafruit_ADXL345_U.h>
 #include <BH1750.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
@@ -17,8 +16,11 @@
 #include "src/MotionSensor.h"
 #include "src/LightSensor.h"
 #include "src/UltrasonicSensor.h"
-#include "src/VibrationSensor.h"
 #include "src/SoundSensor.h"
+#include <WiFi.h>
+#include <time.h>
+#include "time.h"
+#include "src/NTP_Time.h"
 
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
@@ -29,7 +31,7 @@
 #endif
 
 unsigned long previousMillis = 0;
-const long interval = 1000; // Interval for logging data (1 second)
+const uint16_t interval = 1000; // Interval for logging data (1 second)
 
 // These are the handles to the separate threads. Each individual thread will run one of the sensors
 TaskHandle_t vibrationThread;
@@ -68,19 +70,22 @@ BLEAdvertising *advertising;
 // Tracks the number of devices connected to this main system (via BLE)
 // By default, there should at least be one BLE connection at all times (the subsystem) and the main system should not be advertising
 // When an emergency alert needs to be sent, the main system will start advertising, and the Android device should pick up the main system on it's scan and connect
-int connectedDevices = 0;
+uint8_t connectedDevices = 0;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Pin setup for sensors
 ////////////////////////////////////////////////////////////////////////////////////////
-const int motionSensorInputPin = 14;
-const int trigPin = 2;  // ultrasonic sensor trigger pin
-const int echoPin = 15; // ultrasonic sensor echo pin
-const int vibrationInputPin = 36;
+const uint8_t motionSensorInputPin = 4;
+const uint8_t trigPin = 2;  // ultrasonic sensor trigger pin
+const uint8_t echoPin = 15; // ultrasonic sensor echo pin
 
 // Right now, the sound sensor isn't used in the main system
-const int soundInputPin = 26;
-const int soundGatePin = 27;
+//const int soundInputPin = 26;
+//const int soundGatePin = 27;
+//Time Server Info struct
+
+NTP_Time timeUpdate;
+timeData currentTime;
 
 // Implementing class for BLEServerCallbacks
 class MyServerCallbacks : public BLEServerCallbacks
@@ -89,45 +94,10 @@ class MyServerCallbacks : public BLEServerCallbacks
     void onDisconnect(BLEServer *server) override;
 };
 
-// After the subsystem successfully establishes a connection, the main system will stop advertising to prevent any other connections
-// If for some reason the subsystem is disconnected, begin advertising again to allow it to reconnect
-void MyServerCallbacks::onConnect(BLEServer *server)
-{
-    connectedDevices++;
-    if (advertising != nullptr)
-    {
-        Serial.println("A device connected");
-        if (connectedDevices >= 1)
-        {
-            Serial.println("All devices connected. Stopping BLE advertise...");
-            server->getAdvertising()->stop();
-        }
-        else
-        {
-            server->getAdvertising()->start();
-        }
-        Serial.print("Connected devices: ");
-        Serial.println(connectedDevices);
-    }
-}
-
-// On subsystem disconnect, if there are no connected devices, begin advertising
-void MyServerCallbacks::onDisconnect(BLEServer *server)
-{
-    connectedDevices--;
-    Serial.println("Device disconnected");
-    Serial.print("Connected devices: ");
-    Serial.println(connectedDevices);
-    if (connectedDevices < 1)
-    {
-        server->getAdvertising()->start();
-    }
-}
-
 ////////////////////////////////////////////////////////////////////////////////////////
 // calibration time (in seconds) for the sensors to be calibrated
 ////////////////////////////////////////////////////////////////////////////////////////
-const int calibrationTime = 30;
+const uint8_t calibrationTime = 30;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Dynamically allocated MotionSensor object which will be used for interacting with the motion sensor
@@ -139,11 +109,6 @@ MotionSensor *motionSensor;
 ////////////////////////////////////////////////////////////////////////////////////////
 UltrasonicSensor *ultrasonicSensor;
 UltrasonicSensor *secondUltrasonicSensor;
-
-////////////////////////////////////////////////////////////////////////////////////////
-// Vibration sensor object for interacting with the vibration sensor
-////////////////////////////////////////////////////////////////////////////////////////
-VibrationSensor *vibrationSensor;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Light sensor object
@@ -163,10 +128,10 @@ String previousMessage = "";
 ////////////////////////////////////////////////////////////////////////////////////////
 // keep track of current time in ms when one of the sensors read HIGH
 ////////////////////////////////////////////////////////////////////////////////////////
-unsigned int timeOfDetection = 0;
-unsigned int lastDetected = 0; // time since last detection in seconds
-unsigned int minutes = 0;      // minutes that have passed since last detection
-unsigned int alertMinutes = 0; // this will determine when an alert will be sent (if it's equal to or greater than EMERGENCY_ALERT_TIME
+uint16_t timeOfDetection = 0;
+uint32_t lastDetected = 0; // time since last detection in seconds
+uint32_t minutes = 0;      // minutes that have passed since last detection
+uint16_t alertMinutes = 0; // this will determine when an alert will be sent (if it's equal to or greater than EMERGENCY_ALERT_TIME
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // JSON Object we will send to the Bluetooth app. It keeps track of the status as well as time since last detection
@@ -342,15 +307,6 @@ void soundTask(void *parameter)
     }
 }
 
-void vibrationTask(void *parameter)
-{
-    while (true)
-    {
-        vibrationSensor->start();
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-}
-
 //////////////////////// SD Card Functions ////////////////////////
 
 // List the files in the SD card
@@ -408,7 +364,7 @@ void createDir(fs::FS &fs, const char *path)
 }
 
 // Remove a directory
-void removeDir(fs::FS &fs, const char *path)
+/*void removeDir(fs::FS &fs, const char *path)
 {
     Serial.printf("Removing Dir: %s\n", path);
     if (fs.rmdir(path))
@@ -439,7 +395,7 @@ void readFile(fs::FS &fs, const char *path)
         Serial.write(file.read());
     }
     file.close();
-}
+}*/
 
 // Write to a file
 void writeFile(fs::FS &fs, const char *path, const char *message)
@@ -486,7 +442,7 @@ void appendFile(fs::FS &fs, const char *path, const char *message)
 }
 
 // Rename a file
-void renameFile(fs::FS &fs, const char *path1, const char *path2)
+/*void renameFile(fs::FS &fs, const char *path1, const char *path2)
 {
     Serial.printf("Renaming file %s to %s\n", path1, path2);
     if (fs.rename(path1, path2))
@@ -511,46 +467,21 @@ void deleteFile(fs::FS &fs, const char *path)
     {
         Serial.println("Delete failed");
     }
-}
+}*/
 
 // Helper function to log the relevent sensor data to the SD card
 void logData()
 {
-    // unsigned long currentMillis = millis();
-    // if (currentMillis - previousMillis >= interval)
-    // {
-    //   previousMillis = currentMillis;
-
-    //   // Get the current time
-    //   String time = String(currentMillis / 1000);
-
-    //   // Retrieve sensor data
-    //   bool motion = motionSensor->isActive();
-    //   bool proximity = ultrasonicSensor->isActive();
-    //   bool occupied = parser.getOccupied();
-    //   float distance = ultrasonicSensor->distance();
-    //   float vibrationIntensity = vibrationSensor->intensity();
-    //   float vibrationBaseline = vibrationSensor->baseline();
-    //   float proximityBaseline = ultrasonicSensor->baseline();
-    //   int connectedDevices = jsonData["connected_devices"];
-
-    //   // Format the data string
-    //   String dataString = time + " -> motion: " + motion + ", proximity: " + proximity + ", occupied: " + occupied +
-    //                       ", distance: " + distance + ", vibrationIntensity: " + vibrationIntensity +
-    //                       ", vibrationBaseline: " + vibrationBaseline + ", proximityBaseline: " + proximityBaseline +
-    //                       ", connected_devices: " + connectedDevices + "\n";
-
-    //   // Write the data string to the SD card
-    //   appendFile(SD, "/log.txt", dataString.c_str());
-    // }
-
+    timeUpdate.updateLocalTime(currentTime);
+    String fileName = "/log-" + String(currentTime.month) + "-" + String(currentTime.day) + "-" + String(currentTime.year) + ".txt";
     unsigned long currentMillis = millis();
     if (currentMillis - previousMillis >= interval)
     {
+
         previousMillis = currentMillis;
 
         // Get the current time
-        String time = String(currentMillis / 1000);
+        String time = (String(currentTime.hour) + "-" + String(currentTime.min) + "-" + String(currentTime.sec));
 
         // Retrieve sensor data
         bool motion = motionSensor->getRawOutput();
@@ -562,7 +493,7 @@ void logData()
         String dataString = time + " -> distance: " + distance + ", motion: " + motion + ", lightIntensity: " + lightIntensity + ", occupied: " + occupied + "\n";
 
         // Write the data string to the SD card
-        appendFile(SD, "/log.txt", dataString.c_str());
+        appendFile(SD, fileName.c_str(), dataString.c_str());
     }
 }
 
@@ -579,6 +510,10 @@ void DataloggingTask(void *parameter)
 void setup()
 {
     Serial.begin(115200);
+
+    //Start NTP Server Sync
+    timeUpdate.ntpSetup();
+    timeUpdate.updateLocalTime(currentTime);
 
     // Initializing SD card
     SPI.begin();
@@ -615,10 +550,8 @@ void setup()
     motionSensor = new MotionSensor(motionSensorInputPin);
     ultrasonicSensor = new UltrasonicSensor(trigPin, echoPin);
     lightSensor = new LightSensor;
-    vibrationSensor = new VibrationSensor(vibrationInputPin);
 
     lightSensor->setup();
-    vibrationSensor->setup();
     light_module.begin();
 
     // Initializing I2C (the vibration and light sensor uses I2C)
@@ -678,7 +611,7 @@ void setup()
     // Start the light and vibration sensors on a separate thread on core 0
     xTaskCreatePinnedToCore(lightTask, "LightTask", 10000, NULL, 0, NULL, 0);
     // xTaskCreatePinnedToCore(soundTask, "SoundTask", 10000, NULL, 0, NULL, 0);
-    xTaskCreatePinnedToCore(vibrationTask, "VibrationTask", 10000, NULL, 0, NULL, 0);
+    //xTaskCreatePinnedToCore(vibrationTask, "VibrationTask", 10000, NULL, 0, NULL, 0);
 }
 
 void loop()
@@ -718,8 +651,6 @@ void loop()
     // Numerical Data
     jsonData["lightIntensity"] = lightSensor->lightValue();
     jsonData["distance"] = ultrasonicSensor->distance();
-    jsonData["vibrationIntensity"] = vibrationSensor->intensity();
-    jsonData["vibrationBaseline"] = vibrationSensor->baseline();
     jsonData["proximityBaseline"] = ultrasonicSensor->baseline();
     jsonData["lightBaseline"] = lightSensor->baseline();
     jsonData["lightOffBaseline"] = lightSensor->baseline_off();
