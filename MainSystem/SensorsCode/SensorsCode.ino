@@ -229,7 +229,7 @@ void DataloggingTask(void *parameter)
 void setup()
 {
     Serial.begin(115200);
-    if(!Serial){
+    while (!Serial){
         continue;
     }
 
